@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 )
 
@@ -26,34 +25,32 @@ PrintError:
 }
 
 func runPatch(patches []*patch) {
+	var err error
 	for _, p := range patches {
-		rdr, err := os.Open(p.path)
-		wtr := io.Discard
-		if err == nil {
-			//wtr, err = os.Open(path)
+		if err = p.Apply(); err != nil {
+			die("%v", err)
 		}
-		if err != nil {
-			rdr.Close()
-			//wtr.Close() // may be nil but that's ok
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			continue
-		}
-
-		p.Apply(rdr, wtr)
-		rdr.Close()
-		//wtr.Close()
+		fmt.Printf("%s %d\n", p.path, len(p.lines))
 	}
+}
+
+func warn(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
+}
+
+func die(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
+	os.Exit(1)
 }
 
 func main() {
 	if len(os.Args) == 1 {
 		patches, err := patchInput()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			die("%v", err)
 		}
 		if patches == nil {
-			fmt.Fprintln(os.Stderr, "warning: stdin patches included no changes and were ignored")
+			warn("stdin patches included no changes and were ignored")
 			return
 		}
 		runPatch(patches)

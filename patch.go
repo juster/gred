@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -115,7 +116,7 @@ func patchInput() ([]*patch, error) {
 			}
 			return nil, err
 		}
-		fmt.Printf("*DBG* lineno:%d n:%d\n", lineno, n)
+		//fmt.Printf("*DBG* lineno:%d n:%d\n", lineno, n)
 		lineno += n
 		if p != nil {
 			patches = append(patches, p)
@@ -163,7 +164,7 @@ func nextPatch(scan *bufio.Scanner) (n int, p *patch, err error) {
 			break
 		}
 		line = scan.Bytes()
-		fmt.Printf("*DBG* %d:%s\n", n, line)
+		//fmt.Printf("*DBG* %d:%s\n", n, line)
 		m = patchPrefixRe.FindSubmatch(line)
 		if m == nil {
 			err = newPatchError(n, line, BadPatchPrefix)
@@ -202,28 +203,52 @@ func nextPatch(scan *bufio.Scanner) (n int, p *patch, err error) {
 	return
 }
 
+func (p patch) Apply() error {
+	var rdr, wtr *os.File
+	var err error
+
+	rdr, err = os.Open(p.path)
+	if err != nil {
+		return err
+	}
+	defer rdr.Close()
+
+	dir, file := filepath.Split(p.path)
+	wtr, err = os.CreateTemp(dir, file)
+	if err != nil {
+		return err
+	}
+
+	err = p.pipe(wtr, rdr)
+	if err != nil {
+		wtr.Close()
+		os.Remove(wtr.Name())
+	} else {
+		err = os.Rename(wtr.Name(), rdr.Name())
+	}
+	return err
+}
+
 var newline = []byte{'\n'}
 
-func (p patch) Apply(rdr io.Reader, wtr io.Writer) error {
+func (p patch) pipe(wtr io.Writer, rdr io.Reader) error {
 	buf := bufio.NewReader(rdr)
 	lineno := 1
 	for _, ln := range p.lines {
-		for ln.n < lineno {
+		for lineno < ln.n {
 			line, err := buf.ReadBytes('\n')
 			if err != nil {
 				return err
 			}
-			if _, err = buf.Discard(1); err != nil {
-				return err
-			}
 			wtr.Write(line)
-			wtr.Write(newline)
 			lineno++
 		}
 		if err := ln.Check(buf); err != nil {
 			return err
 		}
 		wtr.Write(ln.b)
+		wtr.Write(newline)
+		lineno++
 	}
 
 	_, err := buf.WriteTo(wtr)
@@ -236,7 +261,10 @@ func (ln patchLine) Check(rdr *bufio.Reader) error {
 	line, err := rdr.ReadBytes('\n')
 	switch err {
 	case nil:
-		// ok
+		i := len(line) - 1
+		if line[i] == '\n' {
+			line = line[:i]
+		}
 	case io.EOF:
 		return UnexpectedEOF
 	default:
