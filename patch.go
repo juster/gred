@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -17,28 +17,51 @@ const (
 )
 
 var (
-	BadPatchIntro, BadContentLine, BadHash error
-	UnexpectedEOF                          error
-	patchIntroRe                           *regexp.Regexp
-	chunkEnd                               []byte
+	BadPatchPrefix, BadCRC, UnexpectedEOF, DupPathGroup error
+	patchPrefixRe                                       *regexp.Regexp
 )
 
 func init() {
-	BadPatchIntro = errors.New("invalid patch intro")
-	BadContentLine = errors.New("path:no\\t should prefix each content line")
-	BadHash = errors.New("chunk hash differs from current file")
+	BadPatchPrefix = errors.New("CRC32 path:no\\t should prefix each content line")
+	BadCRC = errors.New("current file modified at patch line")
 	UnexpectedEOF = errors.New("unexpected end of file")
-	patchIntroRe = regexp.MustCompile(
-		"^([^:]+):([0-9]+),([0-9]+) ([0-9]+),([0-9]+) ([0-9a-f]+) {{{$")
-	chunkEnd = []byte("}}} ")
+	DupPathGroup = errors.New("file lines must be grouped by file")
+	patchPrefixRe = regexp.MustCompile("^.([A-F0-9]{8}). ([^:]+):([0-9]+)\t")
+	seenPath = make(map[string]bool)
+}
+
+type patchLine struct {
+	n   int
+	b   []byte
+	crc uint32
 }
 
 type patch struct {
-	path        string
-	hash        []byte
-	lines       [][]byte
-	start, stop int64
-	inputLine   int
+	path  string
+	lines []*patchLine
+}
+
+func newPatchLine(crc, lineno, line []byte) (*patchLine, error) {
+	i, err := strconv.ParseUint(string(crc), 16, 32)
+	if err != nil {
+		return nil, err
+	}
+
+	oldCrc, newCrc := uint32(i), crc32.ChecksumIEEE(line)
+	if oldCrc == newCrc {
+		// patch lines without changes are ignored
+		return nil, nil
+	}
+
+	j, err := strconv.ParseUint(string(lineno), 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	if j < 0 {
+		return nil, errors.New("negative line no")
+	}
+
+	return &patchLine{n: int(j), b: line, crc: oldCrc}, nil
 }
 
 type patchError struct {
@@ -56,6 +79,10 @@ func (e *patchError) Error() string {
 	return fmt.Sprintf("%v: line %d: %s", e.Wrapped, e.LineNo, e.Line)
 }
 
+func (e *patchError) StartsFrom(start int) {
+	e.LineNo += start - 1
+}
+
 func (e *patchError) Unwrap() error {
 	return e.Wrapped
 }
@@ -66,233 +93,159 @@ func (e *patchError) Unwrap() error {
 // TODO: Design a bufio.Scanner or something to avoid loading all input into
 // memory?
 
-func patchInput() (map[string][]*patch, error) {
+func patchInput() ([]*patch, error) {
 	if len(os.Args) != 1 {
 		return nil, nil
 	}
 
-	var buf []byte
+	scan := bufio.NewScanner(os.Stdin)
+	if !scan.Scan() {
+		return nil, scan.Err()
+	}
+	var patches []*patch
+	var lineno = 1
 	var err error
-	if buf, err = io.ReadAll(os.Stdin); err != nil {
-		return nil, err
-	}
-	if len(buf) == 0 {
-		return nil, nil
-	}
-	lines := bytes.Split(buf, []byte("\n"))
-	if len(lines) > 0 && len(lines[len(lines)-1]) == 0 {
-		lines = lines[:len(lines)-1]
-	}
-	for i, ln := range lines {
-		lines[i] = bytes.TrimSuffix(ln, []byte("\r"))
-	}
-
-	patches := make(map[string][]*patch)
-	for i, n := 0, 0; i < len(lines); i += n {
-		p := &patch{inputLine: i + 1}
-		if n, err = nextPatch(p, lines[i:]); err != nil {
-			return nil, newPatchError(i+n, lines[i+n], err)
+	for err != io.EOF {
+		var p *patch
+		var n int
+		n, p, err = nextPatch(scan)
+		if err != nil && err != io.EOF {
+			if patchErr, ok := err.(*patchError); ok {
+				patchErr.StartsFrom(lineno)
+			}
+			return nil, err
 		}
-		if n == 0 {
-			panic("nextPatch should return error if n == 0")
+		fmt.Printf("*DBG* lineno:%d n:%d\n", lineno, n)
+		lineno += n
+		if p != nil {
+			patches = append(patches, p)
 		}
-		patches[p.path] = append(patches[p.path], p)
-		fmt.Printf("DBG: i=%d n=%d len=%d\n", i, n, len(lines))
-	}
-	if err = finishPatchSet(patches); err != nil {
-		return nil, err
 	}
 	return patches, nil
 }
 
-// nextPatch reads the next patch chunk where each patch chunk consists
-// of separate lines:
-// 1. 1-line patch prefix:
-//    {{{
-//    SPACE
-//    (relative path to file) :
-//    (line_start 1-indexed) , (line_stop 1-indexed)
-//    SPACE
-//    (start byte offset) , (end byte offset -- exclusive)
-//    SPACE
-//    (md5 hash of original bytes)
-// 2. n-lines: any (or 0) lines to replace the original
-// 3. 1-line: patch suffix:
-//    }}}
-//    (md5 hash of original bytes)
-// 4. 1-line: an empty line
-//
-// line_start and line_stop specify an inclusive line range.
-// start and stop specify an inclusive byte range.
+var seenPath map[string]bool
 
-func nextPatch(p *patch, lines [][]byte) (int, error) {
-	var n int
-
-	if len(lines) < 3 {
-		return n, errors.New("incomplete patch segment")
-	}
-	m := patchIntroRe.FindSubmatch(lines[0])
+// nextPatch reads the next lines where each line belongs to the same file.
+func nextPatch(scan *bufio.Scanner) (n int, p *patch, err error) {
+	line := scan.Bytes()
+	m := patchPrefixRe.FindSubmatch(line)
 	if m == nil {
-		return n, BadPatchIntro
+		err = newPatchError(0, line, BadPatchPrefix)
+		return
 	}
-	if err := loadPatchPrefix(p, m); err != nil {
-		return n, err
+	rest := line[len(m[0]):]
+	ln, err := newPatchLine(m[1], m[3], rest)
+	if err != nil {
+		err = newPatchError(0, m[0], err)
+		return
 	}
 
+	path := string(m[2])
+	if seenPath[path] {
+		err = newPatchError(0, m[0], DupPathGroup)
+		return
+	}
+	seenPath[path] = true
+
+	p = &patch{}
+	p.path = path
+	if ln != nil {
+		p.lines = []*patchLine{ln}
+	}
+
+	var eof bool
 	for n = 1; ; n++ {
-		if n >= len(lines) {
-			return n - 1, errors.New("chunk end not found")
-		}
-		if isChunkSuffix(lines[n], p.hash) {
-			n++
+		if !scan.Scan() {
+			if scan.Err() == nil {
+				eof = true
+			}
 			break
 		}
-		p.lines = append(p.lines, lines[n])
-	}
-	return n + countEmptyLines(lines[n:]), nil
-}
-
-func loadPatchPrefix(p *patch, m [][]byte) (err error) {
-	p.path = string(m[1])
-	line_start, err := strconv.ParseInt(string(m[2]), 10, 64)
-	if err != nil {
-		return
-	}
-	line_stop, err := strconv.ParseInt(string(m[3]), 10, 64)
-	if err != nil {
-		return
-	}
-	p.start, err = strconv.ParseInt(string(m[4]), 10, 64)
-	if err != nil {
-		return
-	}
-	p.stop, err = strconv.ParseInt(string(m[5]), 10, 64)
-	if err != nil {
-		return
-	}
-	hash_len := len(m[6])
-	if hash_len%2 == 1 || hash_len != 2*patchHashSize {
-		return fmt.Errorf("hash should be %d chars", 2*patchHashSize)
-	}
-	p.hash = m[6]
-
-	if line_start < 1 || line_stop < 1 {
-		return errors.New("line nos cannot be less than 1")
-	}
-	if p.start < 0 || p.stop < 0 {
-		return errors.New("byte offsets cannot be less than 0")
-	}
-	line_count := line_stop - line_start + 1
-	if line_count <= 0 {
-		return errors.New("invalid line range")
-	}
-	if p.stop-p.start <= 0 {
-		return errors.New("invalid byte range")
-	}
-	return nil
-}
-
-func isChunkSuffix(line, hash1 []byte) bool {
-	if !bytes.HasPrefix(line, chunkEnd) {
-		return false
-	}
-	hash2 := line[len(chunkEnd):]
-	if len(hash1) != len(hash2) {
-		return false
-	}
-	for i, x := range hash1 {
-		if hash2[i] != x {
-			return false
+		line = scan.Bytes()
+		fmt.Printf("*DBG* %d:%s\n", n, line)
+		m = patchPrefixRe.FindSubmatch(line)
+		if m == nil {
+			err = newPatchError(n, line, BadPatchPrefix)
+			return
+		}
+		if p.path != string(m[2]) {
+			// End of grep lines for the original path.
+			// nextPatch must be stopped and called again.
+			break
+		}
+		rest = line[len(m[0]):]
+		ln, err = newPatchLine(m[1], m[3], rest)
+		switch {
+		case err != nil:
+			err = newPatchError(n, m[0], err)
+			return
+		case ln != nil:
+			p.lines = append(p.lines, ln)
 		}
 	}
-	return true
-}
-
-func countEmptyLines(lines [][]byte) int {
-	var i int
-	for ; i < len(lines) && len(lines[i]) == 0; i++ {
+	if err = scan.Err(); err != nil {
+		return
 	}
-	return i
-}
-
-func finishPatchSet(m map[string][]*patch) error {
-	for path, ps := range m {
-		sort.Slice(ps, func(i, j int) bool {
-			return ps[i].start < ps[j].start
-		})
-		// check for overlapping byte ranges
-		for i := 1; i < len(ps); i++ {
-			p, q := ps[i-1], ps[i]
-			if p.start == q.start || p.stop > q.start {
-				return fmt.Errorf(
-					"overlapping patches for %s at input lines %d & %d",
-					path, p.inputLine, q.inputLine)
-			}
-		}
+	if eof {
+		err = io.EOF
 	}
-	return nil
+	// all lines may have been skipped
+	if p.lines == nil {
+		p = nil
+		return
+	}
+	// Ensure lines are in order.
+	sort.Slice(p.lines, func(i, j int) bool {
+		return p.lines[i].n < p.lines[j].n
+	})
+	return
 }
 
-const apply_buf_len = 1024
+var newline = []byte{'\n'}
 
-var apply_buf [apply_buf_len]byte
-
-func applyPatches(rdr io.Reader, wtr io.Writer, todo []*patch) error {
-	var offset int64
-	for todo != nil {
-		n := todo[0].start - offset
-		if n == 0 {
-			if err := todo[0].Check(rdr); err != nil {
+func (p patch) Apply(rdr io.Reader, wtr io.Writer) error {
+	buf := bufio.NewReader(rdr)
+	lineno := 1
+	for _, ln := range p.lines {
+		for ln.n < lineno {
+			line, err := buf.ReadBytes('\n')
+			if err != nil {
 				return err
 			}
-			for _, ln := range todo[0].lines {
-				fmt.Fprintln(wtr, ln)
+			if _, err = buf.Discard(1); err != nil {
+				return err
 			}
-			// pretend we resume at the original offset, not the actual (new) one
-			offset = todo[0].stop
-			todo = todo[1:]
-			continue
+			wtr.Write(line)
+			wtr.Write(newline)
+			lineno++
 		}
-		if n > apply_buf_len {
-			n = apply_buf_len
-		}
-
-		m, err := rdr.Read(apply_buf[:n])
-		if err != nil {
+		if err := ln.Check(buf); err != nil {
 			return err
 		}
-		if n > int64(m) {
-			return UnexpectedEOF
-		}
-		offset += n
-
-		if m, err = wtr.Write(apply_buf[:]); err != nil {
-			return err
-		}
-		if m < apply_buf_len {
-			return errors.New("failed to write all bytes")
-		}
+		wtr.Write(ln.b)
 	}
 
-	_, err := io.Copy(wtr, rdr)
+	_, err := buf.WriteTo(wtr)
 	return err
 }
 
-func (p patch) Check(rdr io.Reader) error {
-	old_len := int(p.stop - p.start)
-	var n int
-	var err error
-	var buf = make([]byte, old_len)
-	if n, err = rdr.Read(buf); err != nil {
+var line_buffer [1024]byte
+
+func (ln patchLine) Check(rdr *bufio.Reader) error {
+	line, err := rdr.ReadBytes('\n')
+	switch err {
+	case nil:
+		// ok
+	case io.EOF:
+		return UnexpectedEOF
+	default:
 		return err
 	}
-	if n != old_len {
-		return UnexpectedEOF
-	}
-	w := strconv.Itoa(2 * patchHashSize)
-	crchex := fmt.Sprintf("%0"+w+"x", crc32.ChecksumIEEE(buf))
-	if string(p.hash) != crchex {
-		return BadHash
+
+	crc := crc32.ChecksumIEEE(line)
+	if crc != ln.crc {
+		return BadCRC
 	}
 	return nil
 }

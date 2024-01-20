@@ -47,13 +47,13 @@ func searcherInput() (*searcher, error) {
 		return nil, err
 	}
 
-	globs := []string{"*"}
-	if ext := os.Getenv("GREDEXT"); ext != "" {
-		var ok bool
-		globs, ok = dotGlobs(ext)
-		if !ok {
-			return nil, errors.New("invalid GREDEXT")
-		}
+	ext := os.Getenv("GREDEXT")
+	if ext == "" {
+		return nil, errors.New("missing GREDEXT")
+	}
+	globs, ok := dotGlobs(ext)
+	if !ok {
+		return nil, errors.New("invalid GREDEXT")
 	}
 	return &searcher{pat: pat, globs: globs}, nil
 }
@@ -100,7 +100,7 @@ func (s *searcher) filterFunc(path string, d fs.DirEntry, err error) error {
 		return nil
 	}
 	if d.IsDir() {
-		if path != "." {
+		if path[0] != '.' {
 			s.dirs = append(s.dirs, path)
 		}
 		return nil

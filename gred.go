@@ -3,11 +3,11 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 )
 
 func runSearch() {
-	fmt.Println("DBG Searching...")
 	s, err := searcherInput()
 	if err != nil {
 		goto PrintError
@@ -25,43 +25,39 @@ PrintError:
 	os.Exit(2)
 }
 
-func runPatch(patches map[string][]*patch) {
-	fmt.Println("DBG Patching...")
-	for path, ps := range patches {
-		for _, p := range ps {
-			fmt.Printf("DBG %s %d,%d %s\n", p.path, p.start, p.stop, p.hash)
-			for _, ln := range p.lines {
-				fmt.Printf("DBG %s\n", ln)
-			}
-		}
-		rdr, err := os.Open(path)
-		var wtr *os.File
+func runPatch(patches []*patch) {
+	for _, p := range patches {
+		rdr, err := os.Open(p.path)
+		wtr := io.Discard
 		if err == nil {
-			wtr, err = os.Open(path)
+			//wtr, err = os.Open(path)
 		}
 		if err != nil {
 			rdr.Close()
-			wtr.Close() // may be nil but that's ok
+			//wtr.Close() // may be nil but that's ok
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			continue
 		}
 
-		applyPatches(rdr, wtr, ps)
+		p.Apply(rdr, wtr)
 		rdr.Close()
-		wtr.Close()
+		//wtr.Close()
 	}
 }
 
 func main() {
-	patches, err := patchInput()
-	switch {
-	case err != nil:
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	case patches != nil:
+	if len(os.Args) == 1 {
+		patches, err := patchInput()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if patches == nil {
+			fmt.Fprintln(os.Stderr, "warning: stdin patches included no changes and were ignored")
+			return
+		}
 		runPatch(patches)
-	default:
-		// if there is no patch chunks supplied on stdin then we must search
+	} else {
 		runSearch()
 	}
 }
