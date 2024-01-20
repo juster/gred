@@ -2,6 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/ascii85"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -11,10 +14,6 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
-)
-
-const (
-	patchHashSize = crc32.Size
 )
 
 var (
@@ -27,7 +26,7 @@ func init() {
 	BadCRC = errors.New("current file modified at patch line")
 	UnexpectedEOF = errors.New("unexpected end of file")
 	DupPathGroup = errors.New("file lines must be grouped by file")
-	patchPrefixRe = regexp.MustCompile("^.([A-F0-9]{8}). ([^:]+):([0-9]+)\t")
+	patchPrefixRe = regexp.MustCompile("^.(.....)\t([^:]+):([0-9]+)\t")
 	seenPath = make(map[string]bool)
 }
 
@@ -43,14 +42,23 @@ type patch struct {
 }
 
 func newPatchLine(crc, lineno, line []byte) (*patchLine, error) {
-	i, err := strconv.ParseUint(string(crc), 16, 32)
+	var crcMem [4]byte
+	var oldCrc uint32
+	var err error
+
+	_, _, err = ascii85.Decode(crcMem[:], crc, true)
+	if err != nil {
+		return nil, err
+	}
+	crcBuf := bytes.NewBuffer(crcMem[:])
+	err = binary.Read(crcBuf, binary.BigEndian, &oldCrc)
 	if err != nil {
 		return nil, err
 	}
 
-	oldCrc, newCrc := uint32(i), crc32.ChecksumIEEE(line)
+	// patch lines without changes are ignored
+	newCrc := crc32.ChecksumIEEE(line)
 	if oldCrc == newCrc {
-		// patch lines without changes are ignored
 		return nil, nil
 	}
 

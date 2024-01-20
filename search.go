@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/ascii85"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -168,14 +170,23 @@ func printLines(first bool, path string, lineno int, buf []byte) (n, lines int) 
 			lines++
 		}
 
-		sepLeft, sepRight := crcSepLeft, crcSepRight
+		sepLeft := crcSepLeft
 		if first {
-			sepLeft, sepRight = firstSepLeft, firstSepRight
+			sepLeft = firstSepLeft
 		}
-		crc := crc32.ChecksumIEEE(line)
-		fmt.Printf("%c%08X%c %s:%d\t%s\n", sepLeft, crc, sepRight, path, lineno+lines, line)
+		fmt.Printf("%c%s\t%s:%d\t%s\n", sepLeft, crcBytes(line), path, lineno+lines, line)
 	}
 	return
+}
+
+func crcBytes(b []byte) []byte {
+	buf := &bytes.Buffer{}
+	crc := crc32.ChecksumIEEE(b)
+	binary.Write(buf, binary.BigEndian, crc)
+
+	dst := make([]byte, ascii85.MaxEncodedLen(4))
+	ascii85.Encode(dst, buf.Bytes())
+	return dst
 }
 
 func lineExpand(i, j int, buf []byte) (int, int) {
