@@ -16,11 +16,10 @@ import (
 )
 
 const (
-	readBufSize   = 1024
-	firstSepLeft  = '╓'
-	firstSepRight = '╖'
-	crcSepLeft    = '║'
-	crcSepRight   = crcSepLeft
+	readBufSize  = 1024
+	firstSepLeft = '╓'
+	crcSepLeft   = '║'
+	crcSepRight  = crcSepLeft
 )
 
 var (
@@ -30,7 +29,7 @@ var (
 // Patterns can be positive or negative file globs
 type searchConfig struct {
 	globs []string
-	path  string
+	paths []string
 	pat   *regexp.Regexp
 }
 
@@ -60,36 +59,40 @@ func searchInput(args []string) (s *searchConfig, err error) {
 	}
 
 	s = &searchConfig{pat: pat}
-	targ := os.Getenv("GRED")
-	ext := os.Getenv("GREDX")
-	switch {
-	case targ != "":
-		if _, err = os.Lstat(targ); err == nil {
-			s.path = targ
-		} else {
-			err = nil
-			s.globs = []string{targ}
-		}
-	case ext != "":
-		globs := dotGlobs(ext)
-		if globs == nil {
-			return nil, errors.New("invalid GREDX")
-		} else {
-			s.globs = globs
-		}
-	default:
+	s.paths, s.globs = parseSearchTarget(os.Getenv("GRED"))
+	extglobs, err := parseExtensions(os.Getenv("GREDX"))
+	if err != nil {
+		return nil, err
+	} else {
+		// extglobs may be nil
+		s.globs = append(s.globs, extglobs...)
+	}
+	if s.paths == nil && s.globs == nil {
 		return nil, NoInput
 	}
 	return
 }
 
-func dotGlobs(dotted string) []string {
+func parseSearchTarget(target string) (paths, globs []string) {
+	for _, trg := range strings.Fields(target) {
+		if _, err := os.Lstat(trg); err == nil {
+			paths = append(paths, trg)
+		} else {
+			globs = append(globs, trg)
+		}
+	}
+	return
+}
+
+func parseExtensions(dotted string) ([]string, error) {
 	str := strings.TrimSpace(dotted)
 	switch {
+	case str == "":
+		return nil, nil
 	case str == ".":
-		return []string{"*"}
+		return []string{"*"}, nil
 	case str[0] != '.':
-		return nil
+		return nil, errors.New("invalid GREDX")
 	}
 	var globs []string
 	for _, ext := range strings.Split(str[1:], ".") {
@@ -99,15 +102,23 @@ func dotGlobs(dotted string) []string {
 		}
 		globs = append(globs, "*."+ext)
 	}
-	return globs
+	return globs, nil
 }
 
 func search(s *searchConfig) error {
-	if s.path != "" {
-		return grep(s.path, s)
+	var err error
+	if s.paths != nil {
+		for _, path := range s.paths {
+			if err = grep(path, s); err != nil {
+				break
+			}
+		}
 	}
-	w := NewWalker(".", s)
-	return w.Walk()
+	if s.globs != nil && err == nil {
+		w := NewWalker(".", s)
+		err = w.Walk()
+	}
+	return err
 }
 
 func (w *walker) Walk() error {
@@ -127,8 +138,7 @@ func (w *walker) Walk() error {
 
 func (w *walker) filterFunc(path string, d fs.DirEntry, err error) error {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", path, err)
-		return nil
+		return err
 	}
 	name := d.Name()
 	switch {
