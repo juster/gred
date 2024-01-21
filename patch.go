@@ -6,7 +6,6 @@ import (
 	"encoding/ascii85"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
@@ -23,17 +22,17 @@ var (
 
 func init() {
 	BadPatchPrefix = errors.New("CRC32 path:no\\t should prefix each content line")
-	BadCRC = errors.New("current file modified at patch line")
-	UnexpectedEOF = errors.New("unexpected end of file")
+	BadCRC = errors.New("file modified at edit line, aborting")
+	UnexpectedEOF = errors.New("premature end of target file, aborting")
 	DupPathGroup = errors.New("file lines must be grouped by file")
 	patchPrefixRe = regexp.MustCompile("^.(.....)\t([^:]+):([0-9]+)\t")
 	seenPath = make(map[string]bool)
 }
 
 type patchLine struct {
-	n   int
-	b   []byte
-	crc uint32
+	n, srcN int
+	b       []byte
+	crc     uint32
 }
 
 type patch struct {
@@ -41,7 +40,7 @@ type patch struct {
 	lines []*patchLine
 }
 
-func newPatchLine(crc, lineno, line []byte) (*patchLine, error) {
+func newPatchLine(crc, lineno, line []byte, srcLineNo int) (*patchLine, error) {
 	var crcMem [4]byte
 	var oldCrc uint32
 	var err error
@@ -70,30 +69,7 @@ func newPatchLine(crc, lineno, line []byte) (*patchLine, error) {
 		return nil, errors.New("negative line no")
 	}
 
-	return &patchLine{n: int(j), b: line, crc: oldCrc}, nil
-}
-
-type patchError struct {
-	LineNo  int
-	Line    []byte
-	Wrapped error
-}
-
-// lineidx is zero-indexed but LineNo is 1-indexed
-func newPatchError(lineIdx int, line []byte, err error) error {
-	return &patchError{lineIdx + 1, line, err}
-}
-
-func (e *patchError) Error() string {
-	return fmt.Sprintf("%v: line %d: %s", e.Wrapped, e.LineNo, e.Line)
-}
-
-func (e *patchError) StartsFrom(start int) {
-	e.LineNo += start - 1
-}
-
-func (e *patchError) Unwrap() error {
-	return e.Wrapped
+	return &patchLine{n: int(j), b: line, crc: oldCrc, srcN: srcLineNo}, nil
 }
 
 // patchInput reads the patch provided as input on standard input.
@@ -113,11 +89,8 @@ func patchInput(args []string) ([]*patch, error) {
 	for err != io.EOF {
 		var p *patch
 		var n int
-		n, p, err = nextPatch(scan)
+		n, p, err = parseNextPatch(lineno, scan)
 		if err != nil && err != io.EOF {
-			if patchErr, ok := err.(*patchError); ok {
-				patchErr.StartsFrom(lineno)
-			}
 			return nil, err
 		}
 		//fmt.Printf("*DBG* lineno:%d n:%d\n", lineno, n)
@@ -132,23 +105,23 @@ func patchInput(args []string) ([]*patch, error) {
 var seenPath map[string]bool
 
 // nextPatch reads the next lines where each line belongs to the same file.
-func nextPatch(scan *bufio.Scanner) (n int, p *patch, err error) {
+func parseNextPatch(lineno int, scan *bufio.Scanner) (n int, p *patch, err error) {
 	line := scan.Bytes()
 	m := patchPrefixRe.FindSubmatch(line)
 	if m == nil {
-		err = newPatchError(0, line, BadPatchPrefix)
+		err = newPatchInputError(lineno, line, BadPatchPrefix)
 		return
 	}
 	rest := line[len(m[0]):]
-	ln, err := newPatchLine(m[1], m[3], rest)
+	ln, err := newPatchLine(m[1], m[3], rest, lineno)
 	if err != nil {
-		err = newPatchError(0, m[0], err)
+		err = newPatchInputError(lineno, m[0], err)
 		return
 	}
 
 	path := string(m[2])
 	if seenPath[path] {
-		err = newPatchError(0, m[0], DupPathGroup)
+		err = newPatchInputError(lineno, m[0], DupPathGroup)
 		return
 	}
 	seenPath[path] = true
@@ -171,7 +144,7 @@ func nextPatch(scan *bufio.Scanner) (n int, p *patch, err error) {
 		//fmt.Printf("*DBG* %d:%s\n", n, line)
 		m = patchPrefixRe.FindSubmatch(line)
 		if m == nil {
-			err = newPatchError(n, line, BadPatchPrefix)
+			err = newPatchInputError(lineno+n, line, BadPatchPrefix)
 			return
 		}
 		if p.path != string(m[2]) {
@@ -180,10 +153,10 @@ func nextPatch(scan *bufio.Scanner) (n int, p *patch, err error) {
 			break
 		}
 		rest = line[len(m[0]):]
-		ln, err = newPatchLine(m[1], m[3], rest)
+		ln, err = newPatchLine(m[1], m[3], rest, lineno+n)
 		switch {
 		case err != nil:
-			err = newPatchError(n, m[0], err)
+			err = newPatchInputError(lineno+n, m[0], err)
 			return
 		case ln != nil:
 			p.lines = append(p.lines, ln)
@@ -241,14 +214,17 @@ func (p patch) pipe(wtr io.Writer, rdr io.Reader) error {
 	for _, ln := range p.lines {
 		for lineno < ln.n {
 			line, err := buf.ReadBytes('\n')
+			if err == io.EOF {
+				err = UnexpectedEOF
+			}
 			if err != nil {
-				return err
+				return newPatchingError(p.path, lineno, ln.srcN, err)
 			}
 			wtr.Write(line)
 			lineno++
 		}
 		if err := ln.Check(buf); err != nil {
-			return err
+			return newPatchingError(p.path, lineno, ln.srcN, err)
 		}
 		wtr.Write(ln.b)
 		wtr.Write(newline)

@@ -16,6 +16,50 @@ func init() {
 	flag.Usage = usage
 }
 
+type lineError struct {
+	path          string
+	pathno, srcno int
+	srcline       []byte
+	wrapped       error
+}
+
+// lineidx is zero-indexed but LineNo is 1-indexed
+func newPatchInputError(lineno int, line []byte, err error) error {
+	return &lineError{
+		srcno:   lineno,
+		srcline: line,
+		wrapped: err,
+	}
+}
+
+// newPatchingError creates an error which occurs while patching a target file.
+func newPatchingError(path string, dstno, srcno int, err error) error {
+	return &lineError{
+		path:    path,
+		pathno:  dstno,
+		srcno:   srcno,
+		wrapped: err,
+	}
+}
+
+func (e *lineError) Error() string {
+	var where, what string
+	if e.path != "" {
+		// this must be an error patching a file at path:pathno
+		where = fmt.Sprintf("%s:%d", e.path, e.pathno)
+		what = fmt.Sprintf("%v (patch line %d)", e.wrapped, e.srcno)
+	} else {
+		// this is an error about a patch on stdin
+		where = fmt.Sprintf("line %d:", e.srcno)
+		what = e.wrapped.Error()
+	}
+	return where + " " + what
+}
+
+func (e *lineError) Unwrap() error {
+	return e.wrapped
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
 
