@@ -96,17 +96,13 @@ func (e *patchError) Unwrap() error {
 	return e.Wrapped
 }
 
-// Read the patch provided as input on standard input. Returns nil, NoPatchInput
-// when that input is empty.
-//
-// TODO: Design a bufio.Scanner or something to avoid loading all input into
-// memory?
-
-func patchInput() ([]*patch, error) {
-	if len(os.Args) != 1 {
-		return nil, nil
+// patchInput reads the patch provided as input on standard input.
+// Returns nil, NoInput when that input is empty.
+func patchInput(args []string) ([]*patch, error) {
+	if len(args) != 0 {
+		warn("patch mode does not accept arguments")
+		usage()
 	}
-
 	scan := bufio.NewScanner(os.Stdin)
 	if !scan.Scan() {
 		return nil, scan.Err()

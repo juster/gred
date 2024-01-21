@@ -28,90 +28,125 @@ var (
 )
 
 // Patterns can be positive or negative file globs
-type searcher struct {
-	buf                [readBufSize]byte
-	files, dirs, globs []string
-	pat                *regexp.Regexp
+type searchConfig struct {
+	globs []string
+	path  string
+	pat   *regexp.Regexp
 }
 
-func searcherInput() (*searcher, error) {
-	if len(os.Args) < 2 {
-		return nil, BadArgs
+type walker struct {
+	dirs, files []string
+	cfg         *searchConfig
+}
+
+func NewWalker(root string, cfg *searchConfig) *walker {
+	return &walker{dirs: []string{root}, cfg: cfg}
+}
+
+func searchInput(args []string) (s *searchConfig, err error) {
+	if len(args) == 0 {
+		return nil, NoInput
 	}
-	for _, expr := range os.Args[1:] {
-		_, err := regexp.Compile(expr)
+	for _, expr := range args {
+		_, err = regexp.Compile(expr)
 		if err != nil {
-			return nil, err
+			return
 		}
 	}
-	pat, err := regexp.Compile(strings.Join(os.Args[1:], "|"))
+	var pat *regexp.Regexp
+	pat, err = regexp.Compile(strings.Join(args, "|"))
 	if err != nil {
 		return nil, err
 	}
 
-	ext := os.Getenv("GREDEXT")
-	if ext == "" {
-		return nil, errors.New("missing GREDEXT")
+	s = &searchConfig{pat: pat}
+	targ := os.Getenv("GRED")
+	ext := os.Getenv("GREDX")
+	switch {
+	case targ != "":
+		if _, err = os.Lstat(targ); err == nil {
+			s.path = targ
+		} else {
+			err = nil
+			s.globs = []string{targ}
+		}
+	case ext != "":
+		globs := dotGlobs(ext)
+		if globs == nil {
+			return nil, errors.New("invalid GREDX")
+		} else {
+			s.globs = globs
+		}
+	default:
+		return nil, NoInput
 	}
-	globs, ok := dotGlobs(ext)
-	if !ok {
-		return nil, errors.New("invalid GREDEXT")
-	}
-	return &searcher{pat: pat, globs: globs}, nil
+	return
 }
 
-func dotGlobs(dotted string) ([]string, bool) {
+func dotGlobs(dotted string) []string {
 	str := strings.TrimSpace(dotted)
 	switch {
 	case str == ".":
-		return []string{"*"}, true
+		return []string{"*"}
 	case str[0] != '.':
-		return nil, false
+		return nil
 	}
 	var globs []string
 	for _, ext := range strings.Split(str[1:], ".") {
+		ext = strings.TrimSpace(ext)
 		if ext == "" {
 			continue
 		}
 		globs = append(globs, "*."+ext)
 	}
-	return globs, true
+	return globs
 }
 
-func (s *searcher) Walk(dir string) error {
-	if err := filepath.WalkDir(dir, s.filterFunc); err != nil {
-		return err
+func search(s *searchConfig) error {
+	if s.path != "" {
+		return grep(s.path, s)
 	}
-	for _, path := range s.files {
-		s.grep(path)
-	}
-	// breadth-first search
-	var next string
-	for len(s.dirs) > 0 {
-		next, s.dirs = s.dirs[0], s.dirs[1:]
-		if err := s.Walk(next); err != nil {
+	w := NewWalker(".", s)
+	return w.Walk()
+}
+
+func (w *walker) Walk() error {
+	for len(w.dirs) > 0 {
+		var next string
+		next, w.dirs = w.dirs[0], w.dirs[1:]
+		//fmt.Printf("*DBG* %s\n", next)
+		if err := filepath.WalkDir(next, w.filterFunc); err != nil {
 			return err
+		}
+		for _, path := range w.files {
+			grep(path, w.cfg)
 		}
 	}
 	return nil
 }
 
-func (s *searcher) filterFunc(path string, d fs.DirEntry, err error) error {
+func (w *walker) filterFunc(path string, d fs.DirEntry, err error) error {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", path, err)
 		return nil
 	}
-	if d.IsDir() {
-		if path[0] != '.' {
-			s.dirs = append(s.dirs, path)
-		}
+	name := d.Name()
+	switch {
+	case path == ".":
 		return nil
+	case d.IsDir():
+		if name[0] == '.' {
+			return fs.SkipDir
+		} else {
+			w.dirs = append(w.dirs, path)
+		}
 	}
-	for _, g := range s.globs {
-		ok, globErr := filepath.Match(g, d.Name())
+	for _, g := range w.cfg.globs {
+		ok, globErr := filepath.Match(g, name)
 		switch {
 		case ok:
-			s.files = append(s.files, path)
+			w.files = append(w.files, path)
+			break
 		case globErr != nil:
 			return globErr
 		}
@@ -120,7 +155,7 @@ func (s *searcher) filterFunc(path string, d fs.DirEntry, err error) error {
 }
 
 // TODO: make more better
-func (s *searcher) grep(path string) error {
+func grep(path string, s *searchConfig) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err

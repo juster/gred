@@ -2,36 +2,37 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 )
 
-func runSearch() {
-	s, err := searcherInput()
-	if err != nil {
-		goto PrintError
-	}
-	if err = s.Walk("."); err == nil {
-		return
-	}
+var (
+	NoInput   = errors.New("No input")
+	patchFlag = flag.Bool("p", false, "patch mode: feed in edited gred match output")
+)
 
-PrintError:
-	if errors.Is(err, BadArgs) {
-		fmt.Fprintln(os.Stderr, "usage: GREDEXT=.foo.bar gred [regexp1] [regexp2]")
-	} else {
-		fmt.Fprintln(os.Stderr, "error:", err)
-	}
-	os.Exit(2)
+func init() {
+	flag.Usage = usage
 }
 
-func runPatch(patches []*patch) {
-	var err error
-	for _, p := range patches {
-		if err = p.Apply(); err != nil {
-			die("%v", err)
-		}
-		fmt.Printf("%s %d\n", p.path, len(p.lines))
-	}
+func usage() {
+	fmt.Fprintln(os.Stderr, `Usage:
+
+Search:
+	(must set GRED or GREDX env var to specify files to search)
+	GRED=*.glob gred '<[^>]+>'
+	GRED=./path/to/file gred -- -p (-- flag let you search for "-p", yay!)
+	GREDX=.foo.bar gred foo (search *.foo and *.bar files)
+	GREDX=. gred [regexp1] (GREDX=. matches all files)
+
+Patch:
+	GRED=. gred foobar > gred.out
+	vim gred.out
+	cat gred.out | gred -p
+`)
+	flag.PrintDefaults()
+	os.Exit(2)
 }
 
 func warn(format string, args ...interface{}) {
@@ -43,18 +44,49 @@ func die(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+func patchMode(patches []*patch) {
+	for _, p := range patches {
+		if patchErr := p.Apply(); patchErr != nil {
+			warn("%v", patchErr)
+			continue
+		}
+		fmt.Printf("%s %d\n", p.path, len(p.lines))
+	}
+}
+
 func main() {
-	if len(os.Args) == 1 {
-		patches, err := patchInput()
-		if err != nil {
-			die("%v", err)
-		}
-		if patches == nil {
-			warn("stdin patches included no changes and were ignored")
-			return
-		}
-		runPatch(patches)
+	var args []string
+	if len(os.Args) < 2 || os.Args[1] != "--" {
+		flag.Parse()
+		args = flag.Args()
 	} else {
-		runSearch()
+		args = os.Args[2:]
+	}
+
+	if *patchFlag {
+		patches, err := patchInput(args)
+		switch {
+		case err == NoInput:
+			usage()
+		case err != nil:
+			die("%v", err)
+		case patches == nil:
+			warn("stdin patches included no changes and were ignored")
+		default:
+			patchMode(patches)
+		}
+		return
+	}
+
+	s, err := searchInput(args)
+	switch {
+	case err == NoInput:
+		fallthrough
+	case s == nil:
+		usage()
+	case err != nil:
+		die("%v", err)
+	default:
+		search(s)
 	}
 }
