@@ -32,15 +32,6 @@ type searchConfig struct {
 	pat   *regexp.Regexp
 }
 
-type walker struct {
-	dirs, files []string
-	cfg         *searchConfig
-}
-
-func NewWalker(root string, cfg *searchConfig) *walker {
-	return &walker{dirs: []string{root}, cfg: cfg}
-}
-
 func searchInput(args []string) (s *searchConfig, err error) {
 	if len(args) == 0 {
 		return nil, nil
@@ -113,28 +104,16 @@ func search(s *searchConfig) error {
 		}
 	}
 	if s.globs != nil && err == nil {
-		w := NewWalker(".", s)
-		err = w.Walk()
+		err = walk(".", s)
 	}
 	return err
 }
 
-func (w *walker) Walk() error {
-	for len(w.dirs) > 0 {
-		var next string
-		next, w.dirs = w.dirs[0], w.dirs[1:]
-		//fmt.Printf("*DBG* %s\n", next)
-		if err := filepath.WalkDir(next, w.filterFunc); err != nil {
-			return err
-		}
-		for _, path := range w.files {
-			grep(path, w.cfg)
-		}
-	}
-	return nil
+func walk(root string, cfg *searchConfig) error {
+	return filepath.WalkDir(root, cfg.walkFunc)
 }
 
-func (w *walker) filterFunc(path string, d fs.DirEntry, err error) error {
+func (cfg *searchConfig) walkFunc(path string, d fs.DirEntry, err error) error {
 	if err != nil {
 		return err
 	}
@@ -145,16 +124,15 @@ func (w *walker) filterFunc(path string, d fs.DirEntry, err error) error {
 	case d.IsDir():
 		if name[0] == '.' {
 			return fs.SkipDir
-		} else {
-			w.dirs = append(w.dirs, path)
 		}
+		return nil
 	}
-	for _, g := range w.cfg.globs {
+	for _, g := range cfg.globs {
 		ok, globErr := filepath.Match(g, name)
 		switch {
 		case ok:
-			w.files = append(w.files, path)
-			break
+			grep(path, cfg)
+			return nil
 		case globErr != nil:
 			return globErr
 		}
