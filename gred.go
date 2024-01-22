@@ -1,14 +1,12 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
 )
 
 var (
-	NoInput   = errors.New("No input")
 	patchFlag = flag.Bool("p", false, "patch mode: feed in edited gred match output")
 )
 
@@ -16,48 +14,15 @@ func init() {
 	flag.Usage = usage
 }
 
-type lineError struct {
-	path          string
-	pathno, srcno int
-	srcline       []byte
-	wrapped       error
-}
-
 // lineidx is zero-indexed but LineNo is 1-indexed
 func newPatchInputError(lineno int, line []byte, err error) error {
-	return &lineError{
-		srcno:   lineno,
-		srcline: line,
-		wrapped: err,
-	}
+	_ = line
+	return fmt.Errorf("line %d: %v", lineno, err)
 }
 
 // newPatchingError creates an error which occurs while patching a target file.
 func newPatchingError(path string, dstno, srcno int, err error) error {
-	return &lineError{
-		path:    path,
-		pathno:  dstno,
-		srcno:   srcno,
-		wrapped: err,
-	}
-}
-
-func (e *lineError) Error() string {
-	var where, what string
-	if e.path != "" {
-		// this must be an error patching a file at path:pathno
-		where = fmt.Sprintf("%s:%d", e.path, e.pathno)
-		what = fmt.Sprintf("%v (patch line %d)", e.wrapped, e.srcno)
-	} else {
-		// this is an error about a patch on stdin
-		where = fmt.Sprintf("line %d:", e.srcno)
-		what = e.wrapped.Error()
-	}
-	return where + " " + what
-}
-
-func (e *lineError) Unwrap() error {
-	return e.wrapped
+	return fmt.Errorf("%s:%d %v (patch line %d)", path, dstno, err, srcno)
 }
 
 func usage() {
@@ -75,7 +40,6 @@ Patch:
 	vim gred.out
 	cat gred.out | gred -p
 `)
-	flag.PrintDefaults()
 	os.Exit(2)
 }
 
@@ -110,8 +74,6 @@ func main() {
 	if *patchFlag {
 		patches, err := patchInput(args)
 		switch {
-		case err == NoInput:
-			usage()
 		case err != nil:
 			die("%v", err)
 		case patches == nil:
@@ -124,8 +86,6 @@ func main() {
 
 	s, err := searchInput(args)
 	switch {
-	case err == NoInput:
-		fallthrough
 	case s == nil:
 		usage()
 	case err != nil:

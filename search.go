@@ -19,7 +19,6 @@ const (
 	readBufSize  = 1024
 	firstSepLeft = '╓'
 	crcSepLeft   = '║'
-	crcSepRight  = crcSepLeft
 )
 
 var (
@@ -44,7 +43,7 @@ func NewWalker(root string, cfg *searchConfig) *walker {
 
 func searchInput(args []string) (s *searchConfig, err error) {
 	if len(args) == 0 {
-		return nil, NoInput
+		return nil, nil
 	}
 	for _, expr := range args {
 		_, err = regexp.Compile(expr)
@@ -63,12 +62,11 @@ func searchInput(args []string) (s *searchConfig, err error) {
 	extglobs, err := parseExtensions(os.Getenv("GREDX"))
 	if err != nil {
 		return nil, err
-	} else {
-		// extglobs may be nil
-		s.globs = append(s.globs, extglobs...)
 	}
+	// extglobs may be nil
+	s.globs = append(s.globs, extglobs...)
 	if s.paths == nil && s.globs == nil {
-		return nil, NoInput
+		return nil, nil
 	}
 	return
 }
@@ -164,7 +162,6 @@ func (w *walker) filterFunc(path string, d fs.DirEntry, err error) error {
 	return nil
 }
 
-// TODO: make more better
 func grep(path string, s *searchConfig) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -242,41 +239,3 @@ func lineExpand(i, j int, buf []byte) (int, int) {
 	}
 	return x, y
 }
-
-/******************************************************
-
-type LineSpy struct {
-	rdr io.Rdr
-	offset, lineNo, prevCount int
-}
-
-func NewLineSpy(rdr io.Reader) *LineSpy {
-	return &LineSpy{rdr, 1, 0}
-}
-
-func (spy *LineSpy) Read(buf []byte) (n int, err error) {
-	spy.lineNo += spy.prevCount
-	spy.prevCount = 0
-	n, err = rdr.Read(buf)
-	if n == 0 || err != nil {
-		return
-	}
-	spy.offset += n
-	for i := 0; i < len(buf); i++ {
-		j := bytes.IndexByte(buf[i:], '\n')
-		if j < 0 {
-			return
-		}
-		spy.prevCount++
-	}
-}
-
-func (spy LineSpy) LineNo() int {
-	retun spy.lineNo + spy.prevCount
-}
-
-func (spy LineSpy) PrevCount() int {
-	return spy.prevCount
-}
-
-******************************************************/

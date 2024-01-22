@@ -26,7 +26,6 @@ func init() {
 	UnexpectedEOF = errors.New("premature end of target file, aborting")
 	DupPathGroup = errors.New("file lines must be grouped by file")
 	patchPrefixRe = regexp.MustCompile("^.(.....)\t([^:]+):([0-9]+)\t")
-	seenPath = make(map[string]bool)
 }
 
 type patchLine struct {
@@ -73,7 +72,7 @@ func newPatchLine(crc, lineno, line []byte, srcLineNo int) (*patchLine, error) {
 }
 
 // patchInput reads the patch provided as input on standard input.
-// Returns nil, NoInput when that input is empty.
+// Returns nil, nil when that input is empty.
 func patchInput(args []string) ([]*patch, error) {
 	if len(args) != 0 {
 		warn("patch mode does not accept arguments")
@@ -86,6 +85,7 @@ func patchInput(args []string) ([]*patch, error) {
 	var patches []*patch
 	var lineno = 1
 	var err error
+	seenPath = make(map[string]bool)
 	for err != io.EOF {
 		var p *patch
 		var n int
@@ -223,7 +223,7 @@ func (p patch) pipe(wtr io.Writer, rdr io.Reader) error {
 			wtr.Write(line)
 			lineno++
 		}
-		if err := ln.Check(buf); err != nil {
+		if err := ln.check(buf); err != nil {
 			return newPatchingError(p.path, lineno, ln.srcN, err)
 		}
 		wtr.Write(ln.b)
@@ -235,9 +235,7 @@ func (p patch) pipe(wtr io.Writer, rdr io.Reader) error {
 	return err
 }
 
-var line_buffer [1024]byte
-
-func (ln patchLine) Check(rdr *bufio.Reader) error {
+func (ln patchLine) check(rdr *bufio.Reader) error {
 	line, err := rdr.ReadBytes('\n')
 	switch err {
 	case nil:
