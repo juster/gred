@@ -28,38 +28,59 @@ var (
 // Patterns can be positive or negative file globs
 type searchConfig struct {
 	globs []string
-	paths []string
-	pat   *regexp.Regexp
+	files []string
+	pats  []*regexp.Regexp
 }
 
-func searchInput(args []string) (s *searchConfig, err error) {
-	if len(args) == 0 {
+func loadSearchConfig(params []string) (*searchConfig, error) {
+	if len(params) == 0 {
 		return nil, nil
 	}
-	for _, expr := range args {
-		_, err = regexp.Compile(expr)
-		if err != nil {
-			return
+	var cfg searchConfig
+	var arg string
+	var i int
+	for i, arg = range params {
+		switch {
+		case arg == "--":
+			i++
+			break
+		case arg[0] == '@':
+			arg = arg[1:]
+			finfo, err := os.Stat(arg)
+			if err != nil || finfo.IsDir() {
+				cfg.globs = append(cfg.globs, arg)
+			} else {
+				cfg.files = append(cfg.files, arg)
+			}
+		default:
+			if err := cfg.pushPattern(arg); err != nil {
+				return nil, err
+			}
 		}
 	}
-	var pat *regexp.Regexp
-	pat, err = regexp.Compile(strings.Join(args, "|"))
-	if err != nil {
-		return nil, err
+	for ; i < len(params); i++ {
+		if err := cfg.pushPattern(params[i]); err != nil {
+			return nil, err
+		}
 	}
 
-	s = &searchConfig{pat: pat}
-	s.paths, s.globs = parseSearchTarget(os.Getenv("GRED"))
 	extglobs, err := parseExtensions(os.Getenv("GREDX"))
 	if err != nil {
 		return nil, err
 	}
 	// extglobs may be nil
-	s.globs = append(s.globs, extglobs...)
-	if s.paths == nil && s.globs == nil {
+	cfg.globs = append(cfg.globs, extglobs...)
+	if cfg.files == nil && cfg.globs == nil {
 		return nil, nil
 	}
-	return
+	return &cfg, nil
+}
+
+func (cfg *searchConfig) pushPattern(pat string) error {
+	re, err := regexp.Compile(pat)
+	// may append nil but that's ok
+	cfg.pats = append(cfg.pats, re)
+	return err
 }
 
 func parseSearchTarget(target string) (paths, globs []string) {
@@ -96,14 +117,16 @@ func parseExtensions(dotted string) ([]string, error) {
 
 func search(s *searchConfig) error {
 	var err error
-	if s.paths != nil {
-		for _, path := range s.paths {
-			if err = grep(path, s); err != nil {
-				break
-			}
+	// s.files may be empty
+	for _, path := range s.files {
+		if err = grep(path, s); err != nil {
+			warn("%s", err)
 		}
 	}
-	if s.globs != nil && err == nil {
+	if len(s.files) > 0 {
+		return nil
+	}
+	if s.globs != nil {
 		err = walk(".", s)
 	}
 	return err
@@ -140,19 +163,70 @@ func (cfg *searchConfig) walkFunc(path string, d fs.DirEntry, err error) error {
 	return nil
 }
 
+type match struct {
+	fail bool
+	idx [2]int
+}
+
+func (m *match) store(idx []int) {
+	if idx == nil {
+		m.fail = true
+		return
+	}
+	m.idx[0] = idx[0]
+	m.idx[1] = idx[1]
+}
+
+func (m *match) seek(offset int) bool {
+	if m.fail {
+		return false
+	}
+	m.idx[0] -= offset
+	m.idx[1] -= offset
+	if m.idx[0] < 0 || m.idx[1] < 0 {
+		return true
+	}
+	return false
+}
+
 func grep(path string, s *searchConfig) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	buf, err := io.ReadAll(f)
-	pat, lineno, first := s.pat, 1, true
+	lineno, first := 1, true
+
+	ms := make([]match, len(s.pats))
+	// prime the matches
+	for i, pat := range s.pats {
+		idx := pat.FindIndex(buf)
+		ms[i].store(idx)
+	}
+
 	for buf != nil {
-		m := pat.FindIndex(buf)
-		if m == nil {
+		var i, j, min, max int
+		j = -1
+		// TODO: does not handle multiple matches perfectly
+		for i = 0; i < len(ms); i++ {
+			m := &ms[i]
+			switch {
+			case m.fail:
+				continue
+			case j < 0 || m.idx[0] < min:
+				j = i
+				min = m.idx[0]
+				max = m.idx[1]
+			case m.idx[0] == min && m.idx[1] > max:
+				max = m.idx[1]
+				j = i
+			}
+		}
+		if j < 0 {
+			// nothing matched
 			break
 		}
-		j, k := lineExpand(m[0], m[1], buf)
+		j, k := lineExpand(ms[j].idx[0], ms[j].idx[1], buf)
 		//fmt.Printf("DBG: j:%d k:%d len:%d buf:%s\n", j, k, len(buf), buf[j:k])
 		n, lines := countLines(lineno, buf[:j])
 		lineno += lines
@@ -162,6 +236,12 @@ func grep(path string, s *searchConfig) error {
 		}
 		lineno += lines
 		buf = buf[k:]
+		for i = 0; i < len(ms); i++ {
+			if i == j || ms[i].seek(k) {
+				idx := s.pats[i].FindIndex(buf)
+				ms[i].store(idx)
+			}
+		}
 	}
 	return nil
 }

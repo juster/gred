@@ -30,8 +30,8 @@ func usage() {
 
 Search:
 	(must set GRED or GREDX env var to specify files to search)
-	GRED=*.glob gred '<[^>]+>'
-	GRED=./path/to/file gred -- -p (-- flag let you search for "-p", yay!)
+	gred '@*.glob' '<[^>]+>'
+	gred -- -p (-- flag let you search for "-p", yay!)
 	GREDX=.foo.bar gred foo (search *.foo and *.bar files)
 	GREDX=. gred [regexp1] (GREDX=. matches all files)
 
@@ -84,7 +84,7 @@ func main() {
 		return
 	}
 
-	s, err := searchInput(args)
+	s, err := loadSearchConfig(args)
 	switch {
 	case s == nil:
 		usage()
